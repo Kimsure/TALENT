@@ -46,7 +46,7 @@ Our model weights have already been open-sourced and can be directly downloaded 
 
 # Acknowledgements
 
-The code is based on [CRIS](https://github.com/DerrickWang005/CRIS.pytorch), [ETRIS](https://github.com/kkakkkka/ETRIS) and [TALENT](https://github.com/jiaqihuang01/TALENT). We thank the authors for their open-sourced code and encourage users to cite their works when applicable.
+The code is based on [CRIS](https://github.com/DerrickWang005/CRIS.pytorch), [ETRIS](https://github.com/kkakkkka/ETRIS) and [DETRIS](https://github.com/jiaqihuang01/DETRIS). We thank the authors for their open-sourced code and encourage users to cite their works when applicable.
 
 # Citation
 
