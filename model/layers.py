@@ -163,17 +163,17 @@ class Neck_CostAffinity(nn.Module):
             
         
         fq = torch.cat([fq3, fq4, fq5], dim=1)
-
-        fq = self.aggr(fq)
+        tccl_feature = self.aggr(fq)
+        fq = tccl_feature
         vis_out.append(fq)
         fq1 = self.coordconv(fq)
 
         fq = fq1 + fq
         vis_out.append(fq)
         if self.training:
-            return fq, Neck_attn_weights, vis_out, affinity_loss
+            return fq, Neck_attn_weights, vis_out, affinity_loss, tccl_feature
         else:
-            return fq, Neck_attn_weights, vis_out
+            return fq, Neck_attn_weights, vis_out, tccl_feature
         
         
         

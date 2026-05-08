@@ -6,7 +6,7 @@ from model.clip import build_model
 from .layers import Decoder, Projector, Neck_CostAffinity
 from .fusion import Fusion, Fusion_EVA
 from .dinov2.models.vision_transformer import vit_base,vit_large
-from utils.loss import Discriminator_loss
+from utils.loss import Discriminator_loss, TCCL_loss
 import eva_clip
 
 class TALENT(nn.Module):
@@ -67,8 +67,10 @@ class TALENT(nn.Module):
 
         # Projector
         self.proj = Projector(cfg.word_dim, cfg.vis_dim // 2, 3)
+        self.discriminator_loss = Discriminator_loss()
+        self.tccl_loss = TCCL_loss()
 
-    def forward(self, img, word, mask=None, epoch=None):
+    def forward(self, img, word, mask=None, epoch=None, pos_word=None, neg_word=None, tccl_valid=None):
         '''
             img: b, 3, h, w
             word: b, words
@@ -82,13 +84,24 @@ class TALENT(nn.Module):
         # vis: C3 / C4 / C5
         # word: b, length, 1024
         # state: b, 1024
-        vis, word, state, _ = self.fusion(img, word, self.txt_backbone, self.dinov2, None)
+        pos_state = None
+        neg_state = None
+        if self.training and pos_word is not None and neg_word is not None:
+            vis, word, state, pos_state, neg_state, _ = self.fusion(img,
+                                                                    word,
+                                                                    self.txt_backbone,
+                                                                    self.dinov2,
+                                                                    None,
+                                                                    pos_word,
+                                                                    neg_word)
+        else:
+            vis, word, state, _ = self.fusion(img, word, self.txt_backbone, self.dinov2, None)
 
         # b, 512, 26, 26 (C4)
         if self.training:
-            fq, _, _, affinity_loss = self.neck(vis, state)
+            fq, _, _, affinity_loss, tccl_feature = self.neck(vis, state)
         else:
-            fq, _, _ = self.neck(vis, state)
+            fq, _, _, _ = self.neck(vis, state)
         b, c, h, w = fq.size()
         fq = self.decoder(fq, word, pad_mask)
         fq = fq.reshape(b, c, h, w)
@@ -103,10 +116,13 @@ class TALENT(nn.Module):
                                      mode='nearest') 
                 mask = mask.detach()
                 
-            dis_l = Discriminator_loss()
-            loss_discriminator = dis_l(pred, mask)
+            loss_discriminator = self.discriminator_loss(pred, mask)
 
             loss = loss_discriminator + 0.1 * affinity_loss
+            if pos_state is not None and neg_state is not None:
+                visual_proto = F.adaptive_avg_pool2d(tccl_feature, (1, 1)).flatten(1)
+                loss_tccl = self.tccl_loss(visual_proto, pos_state, neg_state, tccl_valid)
+                loss = loss + 0.1 * loss_tccl
                 
             return pred.detach(), mask, loss
         else:
@@ -114,39 +130,28 @@ class TALENT(nn.Module):
         
         
     def forward_with_features(self, img, word):
-        """前向传播并返回中间特征
-        Args:
-            img: 输入图像 [b, 3, h, w]
-            word: 输入文本 [b, words]
-        Returns:
-            pred: 预测结果
-            features: 包含中间特征的字典
-        """
         # padding mask used in decoder
         pad_mask = torch.zeros_like(word).masked_fill_(word == 0, 1).bool()
-        print("word.shape", word.shape)
-        # 获取视觉和文本特征
+        # print("word.shape", word.shape)
         vis, word, state, vis_feats = self.fusion(img, word, self.txt_backbone, self.dinov2, None)
-
-        # 获取neck特征 [b, 512, 26, 26]
-        Neck_fq, _, Neck_vis = self.neck(vis, state)
+        neck_outputs = self.neck(vis, state)
+        if self.training:
+            Neck_fq, _, Neck_vis, _, tccl_feature = neck_outputs
+        else:
+            Neck_fq, _, Neck_vis, tccl_feature = neck_outputs
         b, c, h, w = Neck_fq.size()
 
-        # 获取decoder特征
         decoder_fq = self.decoder(Neck_fq, word, pad_mask)
         decoder_fq = decoder_fq.reshape(b, c, h, w)
-
-        # 获取最终预测结果
         pred = self.proj(decoder_fq, state)
-
-        # 收集所有特征
         features = {
-            'vis': vis,  # 视觉特征
-            'vis_feats': vis_feats,  # 视觉特征列表
-            'Neck_fq': Neck_fq,  # neck输出特征
-            'Neck_vis': Neck_vis,  # neck输出特征
-            'decoder_fq': decoder_fq,  # decoder输出特征
-            'pred': pred,  # 最终预测结果
+            'vis': vis,  
+            'vis_feats': vis_feats, 
+            'Neck_fq': Neck_fq,  
+            'Neck_vis': Neck_vis,  
+            'tccl_feature': tccl_feature,  
+            'decoder_fq': decoder_fq, 
+            'pred': pred, 
         }
 
-        return pred.detach(), features, _, word, state
+        return pred.detach(), features, None, word, state

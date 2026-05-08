@@ -20,8 +20,8 @@ from loguru import logger
 from torch.optim.lr_scheduler import MultiStepLR
 import utils.config as config
 # from lion_pytorch import Lion
-from utils.dataset import RefDataset
-# from utils.dataset_nemo import RefDataset
+from utils.dataset import RefDataset as ValRefDataset
+from utils.dataset_CL import RefDataset as TrainRefDataset
 from engine.engine import train, validate
 from model import build_segmenter
 from utils.misc import (init_random_seed, set_random_seed, setup_logger,
@@ -106,20 +106,20 @@ def main_worker(args):
     args.batch_size = int(args.batch_size / args.ngpus_per_node)
     args.batch_size_val = int(args.batch_size_val / args.ngpus_per_node)
     args.workers = int((args.workers + args.ngpus_per_node - 1) / args.ngpus_per_node)
-    train_data = RefDataset(lmdb_dir=args.train_lmdb,
-                            mask_dir=args.mask_root,
-                            dataset=args.dataset,
-                            split=args.train_split,
-                            mode='train',
-                            input_size=args.input_size,
-                            word_length=args.word_len)
-    val_data = RefDataset(lmdb_dir=args.val_lmdb,
-                          mask_dir=args.mask_root,
-                          dataset=args.dataset,
-                          split=args.val_split,
-                          mode='val',
-                          input_size=args.input_size,
-                          word_length=args.word_len)
+    train_data = TrainRefDataset(lmdb_dir=args.train_lmdb,
+                                 mask_dir=args.mask_root,
+                                 dataset=args.dataset,
+                                 split=args.train_split,
+                                 mode='train',
+                                 input_size=args.input_size,
+                                 word_length=args.word_len)
+    val_data = ValRefDataset(lmdb_dir=args.val_lmdb,
+                             mask_dir=args.mask_root,
+                             dataset=args.dataset,
+                             split=args.val_split,
+                             mode='val',
+                             input_size=args.input_size,
+                             word_length=args.word_len)
 
     # build dataloader
     init_fn = partial(worker_init_fn,

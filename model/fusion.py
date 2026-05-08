@@ -101,49 +101,13 @@ class Fusion(nn.Module):
             elif isinstance(m, nn.ConvTranspose2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')                
 
-    def forward(self, img, text, txt_backbone,dino,pad_mask=None):
-        B=img.shape[0]
-        img = img.type(txt_backbone.dtype)
-        vis_outs = []
-        outputs=[]
-        txt = txt_backbone.token_embedding(text).type(
-            txt_backbone.dtype)  # [batch_size, n_ctx, d_model]
-
+    def _encode_text(self, text, txt_backbone):
+        txt = txt_backbone.token_embedding(text).type(txt_backbone.dtype)
         txt_enc = txt_backbone.transformer
         txt = txt + txt_backbone.positional_embedding.type(txt_backbone.dtype)[:txt.size(1)]
-        
-        #dinov2  
-        net_input = img.clone()
-        B, nc, w, h = net_input.shape
-        dino_f = dino.patch_embed(net_input)
-        dino_f = torch.cat((dino.cls_token.expand(dino_f.shape[0], -1, -1), dino_f), dim=1)
-        dino_f = dino_f + dino.interpolate_pos_encoding(dino_f, w, h)
-        dino_f = torch.cat(
-            (
-                dino_f[:, :1],
-                dino.register_tokens.expand(dino_f.shape[0], -1, -1),
-                dino_f[:, 1:],
-            ),
-            dim=1,
-        )
-        
-        # language
-        if 0:
-            if self.interact_v2t:
-                txt_add = self.interact_v2t(dino_f[:, 0:1, :])
-                txt = torch.cat((txt_add, txt), dim=1)
-            
-        # text prompt tunning
+        txt = txt.permute(1, 0, 2)  # BLD -> LBD   
         if 0:
             B, L, D = txt.shape
-            txt = torch.cat((
-                    self.prompt_dropout(self.prompt_proj(self.prompt_embeddings).expand(B, -1, -1)),
-                    txt[:, :, :]
-                ), dim=1)
-                
-        txt = txt.permute(1, 0, 2)  # BLD -> LBD   
-        # text prompt tunning
-        if 0:
             if self.total_d_layer == 0: #shallow 
                 for i in range(self.num_layers):
                     txt = txt_enc.resblocks[i](txt)
@@ -169,17 +133,42 @@ class Fusion(nn.Module):
         else:
             for i in range(self.num_layers):
                 txt = txt_enc.resblocks[i](txt)
-                
+
         txt = txt.permute(1, 0, 2)  # LBD -> BLD
         txt = txt_backbone.ln_final(txt).type(txt_backbone.dtype)
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        # txt = txt[:, :-1, :]
-        state = txt[torch.arange(txt.shape[0]),
-                  text.argmax(dim=-1)] @ txt_backbone.text_projection# get sentence-level feature Fs
-        
-        
+        state = txt[torch.arange(txt.shape[0], device=text.device),
+                    text.argmax(dim=-1)] @ txt_backbone.text_projection
+        return txt, state
+
+    def forward(self, img, text, txt_backbone, dino, pad_mask=None, pos_text=None, neg_text=None):
+        img = img.type(txt_backbone.dtype)
+        vis_outs = []
+        pos_state, neg_state = None, None
+        if pos_text is not None and neg_text is not None:
+            cat_text = torch.cat([text, pos_text, neg_text], dim=0)
+            cat_txt, cat_state = self._encode_text(cat_text, txt_backbone)
+            txt, _, _ = torch.chunk(cat_txt, 3, dim=0)
+            state, pos_state, neg_state = torch.chunk(cat_state, 3, dim=0)
+        else:
+            txt, state = self._encode_text(text, txt_backbone)
+
+        #dinov2
+        net_input = img.clone()
+        B, nc, w, h = net_input.shape
+        dino_f = dino.patch_embed(net_input)
+        dino_f = torch.cat((dino.cls_token.expand(dino_f.shape[0], -1, -1), dino_f), dim=1)
+        dino_f = dino_f + dino.interpolate_pos_encoding(dino_f, w, h)
+        dino_f = torch.cat(
+            (
+                dino_f[:, :1],
+                dino.register_tokens.expand(dino_f.shape[0], -1, -1),
+                dino_f[:, 1:],
+            ),
+            dim=1,
+        )
+
         # visual
-        features_dino=[]
+        features_dino = []
         if 0:
             if self.interact_t2v:
                 dino_f = torch.cat(
@@ -222,9 +211,9 @@ class Fusion(nn.Module):
 
         # forward
 
-        output = vis_outs , txt, state, vis_feats
-
-        return output
+        if pos_state is not None and neg_state is not None:
+            return vis_outs, txt, state, pos_state, neg_state, vis_feats
+        return vis_outs, txt, state, vis_feats
 
 
 
@@ -280,17 +269,35 @@ class Fusion_EVA(nn.Module):
             elif isinstance(m, nn.ConvTranspose2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')                
 
-    def forward(self, img, text, txt_backbone,dino):
-        B=img.shape[0]
-        img = img.type(txt_backbone.dtype)
-        vis_outs = []
-        outputs=[]
+    def _encode_text(self, text, txt_backbone):
         txt_enc = txt_backbone.text
         cast_dtype = txt_enc.transformer.get_cast_dtype()
         txt = txt_enc.token_embedding(text).to(cast_dtype)   # [batch_size, n_ctx, d_model]
         txt = txt + txt_enc.positional_embedding.to(cast_dtype)[:txt.size(1)]
-        
-        #dinov2  
+        txt = txt.permute(1, 0, 2)  # BLD -> LBD    
+        for i in range(self.num_layers):
+            txt = txt_enc.transformer.resblocks[i](txt)
+
+        # language
+        txt = txt.permute(1, 0, 2)  # LBD -> BLD
+        txt = txt_enc.ln_final(txt).type(cast_dtype)
+        state = txt[torch.arange(txt.shape[0], device=text.device),
+                    text.argmax(dim=-1)] @ txt_enc.text_projection
+        return txt, state
+
+    def forward(self, img, text, txt_backbone, dino, pad_mask=None, pos_text=None, neg_text=None):
+        img = img.type(txt_backbone.dtype)
+        vis_outs = []
+        pos_state, neg_state = None, None
+        if pos_text is not None and neg_text is not None:
+            cat_text = torch.cat([text, pos_text, neg_text], dim=0)
+            cat_txt, cat_state = self._encode_text(cat_text, txt_backbone)
+            txt, _, _ = torch.chunk(cat_txt, 3, dim=0)
+            state, pos_state, neg_state = torch.chunk(cat_state, 3, dim=0)
+        else:
+            txt, state = self._encode_text(text, txt_backbone)
+
+        #dinov2
         net_input = img.clone()
         B, nc, w, h = net_input.shape
         dino_f = dino.patch_embed(net_input)
@@ -305,9 +312,6 @@ class Fusion_EVA(nn.Module):
             dim=1,
         )
         if 1:
-            # if self.interact_v2t:
-            #     txt_add = self.interact_v2t(dino_f[:, 0:1, :])
-            #     txt = torch.cat((txt_add, txt), dim=1)
             if self.interact_t2v:
                 dino_f = torch.cat(
                     (
@@ -317,19 +321,8 @@ class Fusion_EVA(nn.Module):
                     ), 
                     dim=1,
                 )
-            
-        txt = txt.permute(1, 0, 2)  # BLD -> LBD    
-        features_dino=[]
-        for i in range(self.num_layers):
-            txt = txt_enc.transformer.resblocks[i](txt)
 
-        # language
-        txt = txt.permute(1, 0, 2)  # LBD -> BLD
-        txt = txt_enc.ln_final(txt).type(cast_dtype)
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        state = txt[torch.arange(txt.shape[0]),
-                  text.argmax(dim=-1)] @ txt_enc.text_projection# get sentence-level feature Fs
-        
+        features_dino = []
         for i in range(self.dino_layers):
             dino_f = dino.blocks[i](dino_f, txt)
             if i in self.output_dinov2:
@@ -351,6 +344,6 @@ class Fusion_EVA(nn.Module):
 
         # forward
 
-        output = vis_outs , txt, state
-
-        return output
+        if pos_state is not None and neg_state is not None:
+            return vis_outs, txt, state, pos_state, neg_state, None
+        return vis_outs, txt, state, None

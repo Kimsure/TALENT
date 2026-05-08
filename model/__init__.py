@@ -1,6 +1,6 @@
 from .segmenter import TALENT
 from loguru import logger
-from .jafar import JAFAR
+# from .jafar import JAFAR
 
 
 def build_segmenter(args):

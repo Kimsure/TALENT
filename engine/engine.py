@@ -32,16 +32,25 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     time.sleep(2)
     end = time.time()
 
-    for i, (image, text, target) in enumerate(train_loader):
+    for i, (image, text, target, pos_text, neg_text, tccl_valid) in enumerate(train_loader):
         data_time.update(time.time() - end)
         # data
         image = image.cuda(non_blocking=True)
         text = text.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True).unsqueeze(1)
+        pos_text = pos_text.cuda(non_blocking=True)
+        neg_text = neg_text.cuda(non_blocking=True)
+        tccl_valid = tccl_valid.cuda(non_blocking=True)
 
         # forward
         with amp.autocast():
-            pred, target, loss = model(image, text, target, epoch)
+            pred, target, loss = model(image,
+                                       text,
+                                       target,
+                                       epoch,
+                                       pos_word=pos_text,
+                                       neg_word=neg_text,
+                                       tccl_valid=tccl_valid)
 
         # backward
         optimizer.zero_grad()
